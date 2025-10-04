@@ -41,6 +41,14 @@ def main():
                        help='禁用缓存')
     parser.add_argument('--format', choices=['markdown', 'html', 'both'],
                        default='both', help='输出格式 (默认: both)')
+    parser.add_argument('--no-context', action='store_true',
+                       help='禁用上下文链接(不使用前面页面的摘要)')
+    parser.add_argument('--context-pages', type=int, default=Config.MAX_CONTEXT_PAGES,
+                       help=f'保留的上下文页数 (默认: {Config.MAX_CONTEXT_PAGES})')
+    parser.add_argument('--max-retries', type=int, default=Config.MAX_RETRIES,
+                       help=f'API请求最大重试次数 (默认: {Config.MAX_RETRIES})')
+    parser.add_argument('--timeout', type=int, default=Config.REQUEST_TIMEOUT,
+                       help=f'API请求超时时间(秒) (默认: {Config.REQUEST_TIMEOUT})')
     
     args = parser.parse_args()
     
@@ -131,25 +139,51 @@ def main():
             
             # 创建LLM处理器
             print(f"\n🤖 正在使用 {args.llm} 分析课件...")
-            llm_handler = create_llm_handler(args.llm, Config, args.prompt)
+            enable_context = Config.ENABLE_CONTEXT_LINKING and not args.no_context
+            
+            if enable_context:
+                print(f"🔗 已启用上下文链接 (保留最近{args.context_pages}页的摘要)")
+            
+            llm_handler = create_llm_handler(
+                args.llm, 
+                Config, 
+                args.prompt,
+                max_retries=args.max_retries,
+                timeout=args.timeout
+            )
             
             # 分析每一页
-            for page_num in tqdm(pages_to_process, desc="分析进度"):
+            for i, page_num in enumerate(tqdm(pages_to_process, desc="分析进度")):
                 image_path = image_paths[page_num]
                 
                 # 可选:提取文本作为辅助上下文
                 try:
                     text_content = processor.extract_text(page_num)
-                    context = f"页面文本内容:\n{text_content[:500]}" if text_content.strip() else ""
+                    context = text_content[:500] if text_content.strip() else ""
                 except:
                     context = ""
                 
+                # 获取前面页面的上下文摘要
+                previous_context = ""
+                if enable_context:
+                    previous_context = llm_handler.get_context_string()
+                
                 # 调用LLM分析
-                analysis = llm_handler.analyze_image(image_path, page_num, context)
+                analysis = llm_handler.analyze_image(
+                    image_path, 
+                    page_num, 
+                    context,
+                    previous_context
+                )
                 analyses.append((page_num, image_path, analysis))
                 
+                # 提取摘要并添加到上下文
+                if enable_context and not analysis.startswith("❌"):
+                    summary = llm_handler.extract_summary(analysis, page_num)
+                    llm_handler.add_to_context(summary, args.context_pages)
+                
                 # 避免触发速率限制
-                if page_num < pages_to_process[-1]:
+                if i < len(pages_to_process) - 1:
                     time.sleep(1)
         
         # 保存缓存
